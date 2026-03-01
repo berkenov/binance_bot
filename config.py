@@ -15,7 +15,7 @@ except ImportError:
 # === Binance Futures: Mainnet или Testnet ===
 # True = тестовые деньги (testnet.binancefuture.com)
 # False = реальная торговля (ОСТОРОЖНО!)
-USE_TESTNET = True
+USE_TESTNET = os.getenv("USE_TESTNET", "true").lower() == "true"
 
 # API ключи для Binance Futures
 # Testnet: создайте ключи на https://testnet.binancefuture.com
@@ -23,9 +23,9 @@ USE_TESTNET = True
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
 BINANCE_SECRET = os.getenv("BINANCE_SECRET", "")
 
-# Telegram Настройки
-TG_BOT_TOKEN = "8618153738:AAEbDalCYQoeUOvLxtkiKCInY645OKxjd48"
-TG_CHAT_ID = "837500523"
+# Telegram Настройки (из .env)
+TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
+TG_CHAT_ID = os.getenv("TG_CHAT_ID", "")
 
 # Торговые настройки
 # Пары загружаются из valid_pairs.csv (Топ-5 по P-Value), fallback — захардкоженный список

@@ -35,6 +35,9 @@ def send_telegram_message(text):
     """
     Отправляет сообщение в Telegram-чат через HTTP API.
     """
+    if not TG_BOT_TOKEN or not TG_CHAT_ID:
+        logger.debug("Telegram не настроен (TG_BOT_TOKEN/TG_CHAT_ID пусты), пропуск отправки")
+        return
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TG_CHAT_ID,

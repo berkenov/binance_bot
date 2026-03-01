@@ -6,7 +6,8 @@ import statsmodels.api as sm
 import time
 from config import (
     TG_BOT_TOKEN, TG_CHAT_ID, TOP_PAIRS, WINDOW, load_state, save_state,
-    USE_TESTNET, BINANCE_API_KEY, BINANCE_SECRET, setup_logging
+    USE_TESTNET, BINANCE_API_KEY, BINANCE_SECRET, setup_logging,
+    ALLOCATION, ENABLE_TRADING
 )
 
 logger = setup_logging('live_bot')
@@ -22,6 +23,12 @@ exchange = ccxt.binanceusdm({
 if USE_TESTNET:
     exchange.set_sandbox_mode(True)
     logger.warning("Режим: BINANCE FUTURES TESTNET (тестовые деньги)")
+
+# Загрузка маркетов для precision (лоты, шаги)
+try:
+    exchange.load_markets()
+except Exception as e:
+    logger.warning("Не удалось загрузить маркеты: %s. Торговля может быть недоступна.", e)
 
 def send_telegram_message(text):
     """
@@ -64,6 +71,89 @@ def fetch_current_price(symbol):
         logger.error("Ошибка получения цены %s: %s", symbol, e)
         return None
 
+def fetch_balance():
+    """Получает доступный баланс USDT на Binance Futures."""
+    if not BINANCE_API_KEY or not BINANCE_SECRET:
+        return 0.0
+    try:
+        balance = exchange.fetch_balance()
+        return float(balance.get('USDT', {}).get('free', 0) or 0)
+    except Exception as e:
+        logger.error("Ошибка получения баланса: %s", e)
+        return 0.0
+
+def calculate_position_amounts(balance_usdt, price_a, price_b, beta):
+    """
+    Расчёт объёмов позиции по beta и ALLOCATION.
+    Хеджирование: value_a = beta * value_b, budget = value_a + value_b.
+    """
+    budget = balance_usdt * ALLOCATION
+    if budget <= 0:
+        return 0.0, 0.0
+    # value_b = budget / (1 + beta), value_a = budget * beta / (1 + beta)
+    value_b = budget / (1 + abs(beta))
+    value_a = budget * abs(beta) / (1 + abs(beta))
+    amount_a = value_a / price_a if price_a > 0 else 0
+    amount_b = value_b / price_b if price_b > 0 else 0
+    return amount_a, amount_b
+
+def _format_amount(symbol, amount):
+    """Округляет amount до допустимой точности биржи."""
+    if amount <= 0:
+        return 0
+    try:
+        return float(exchange.amount_to_precision(symbol, amount))
+    except Exception:
+        return round(amount, 8)
+
+def place_entry_orders(asset_a, asset_b, position_type, amount_a, amount_b):
+    """
+    Размещает ордера на вход в спред.
+    position_type=1: Long spread (buy A, sell B)
+    position_type=-1: Short spread (sell A, buy B)
+    """
+    amt_a = _format_amount(asset_a, amount_a)
+    amt_b = _format_amount(asset_b, amount_b)
+    if amt_a <= 0 or amt_b <= 0:
+        logger.error("Нулевой объём для входа: %s %.8f, %s %.8f", asset_a, amt_a, asset_b, amt_b)
+        return False
+    orders_ok = True
+    try:
+        if position_type == 1:  # Long spread: buy A, sell B
+            o1 = exchange.create_order(asset_a, 'market', 'buy', amt_a)
+            o2 = exchange.create_order(asset_b, 'market', 'sell', amt_b)
+        else:  # Short spread: sell A, buy B
+            o1 = exchange.create_order(asset_a, 'market', 'sell', amt_a)
+            o2 = exchange.create_order(asset_b, 'market', 'buy', amt_b)
+        logger.info("Ордера размещены: %s %s, %s %s", asset_a, o1.get('id'), asset_b, o2.get('id'))
+    except Exception as e:
+        logger.exception("Ошибка размещения ордеров входа: %s", e)
+        orders_ok = False
+    return orders_ok
+
+def place_exit_orders(asset_a, asset_b, position_type, amount_a, amount_b):
+    """
+    Размещает ордера на выход из спреда (закрытие позиции).
+    """
+    amt_a = _format_amount(asset_a, amount_a)
+    amt_b = _format_amount(asset_b, amount_b)
+    if amt_a <= 0 or amt_b <= 0:
+        logger.error("Нулевой объём для выхода: %s %.8f, %s %.8f", asset_a, amt_a, asset_b, amt_b)
+        return False
+    orders_ok = True
+    try:
+        if position_type == 1:  # Были long A, short B → sell A, buy B
+            o1 = exchange.create_order(asset_a, 'market', 'sell', amt_a)
+            o2 = exchange.create_order(asset_b, 'market', 'buy', amt_b)
+        else:  # Были short A, long B → buy A, sell B
+            o1 = exchange.create_order(asset_a, 'market', 'buy', amt_a)
+            o2 = exchange.create_order(asset_b, 'market', 'sell', amt_b)
+        logger.info("Ордера выхода размещены: %s %s, %s %s", asset_a, o1.get('id'), asset_b, o2.get('id'))
+    except Exception as e:
+        logger.exception("Ошибка размещения ордеров выхода: %s", e)
+        orders_ok = False
+    return orders_ok
+
 def calculate_current_zscore(price_a_series, price_b_series):
     """
     Считает бету, спред и текущий z-score по переданным сериям (длина должна быть равна WINDOW)
@@ -102,9 +192,13 @@ def run_monitor():
     for asset_a, asset_b in TOP_PAIRS:
         pair_key = f"{asset_a}_{asset_b}"
         pair_state = state.get(pair_key)
-        
         if not pair_state:
-            continue
+            pair_state = {
+                "in_position": False, "position_type": 0,
+                "entry_price_a": 0, "entry_price_b": 0,
+                "amount_a": 0, "amount_b": 0, "entry_z": 0
+            }
+            state[pair_key] = pair_state
             
         logger.info("Анализ %s - %s", asset_a, asset_b)
         
@@ -148,26 +242,61 @@ def run_monitor():
         
         # Вход (Лонг спреда)
         if not in_pos and z_score < -2.0:
-            pair_state['in_position'] = True
-            pair_state['position_type'] = 1
-            pair_state['entry_z'] = z_score
-            pair_state['entry_price_a'] = current_price_a
-            pair_state['entry_price_b'] = current_price_b
-            
-            msg = f"🟢 <b>СИГНАЛ ВХОДА!</b>\nПара: {asset_a} / {asset_b}\nНаправление: ЛОНГ Спреда (Купить А, Продать B)\nZ-Score: {z_score:.2f}\nКоэфф. Хеджирования (Beta): {beta:.4f}"
+            balance = fetch_balance() if ENABLE_TRADING else 1000.0  # для расчёта при логировании
+            amount_a, amount_b = calculate_position_amounts(balance, current_price_a, current_price_b, beta)
+
+            orders_placed = False
+            if ENABLE_TRADING and amount_a > 0 and amount_b > 0:
+                if place_entry_orders(asset_a, asset_b, 1, amount_a, amount_b):
+                    orders_placed = True
+                else:
+                    logger.error("Вход отменён из-за ошибки ордеров")
+                    time.sleep(0.5)
+                    continue
+
+            # Обновляем state только если разместили ордера или режим только сигналов
+            if orders_placed or not ENABLE_TRADING:
+                pair_state['in_position'] = True
+                pair_state['position_type'] = 1
+                pair_state['entry_z'] = z_score
+                pair_state['entry_price_a'] = current_price_a
+                pair_state['entry_price_b'] = current_price_b
+                pair_state['amount_a'] = amount_a if ENABLE_TRADING else 0
+                pair_state['amount_b'] = amount_b if ENABLE_TRADING else 0
+
+            msg = f"🟢 <b>СИГНАЛ ВХОДА!</b>\nПара: {asset_a} / {asset_b}\nНаправление: ЛОНГ Спреда (Купить А, Продать B)\nZ-Score: {z_score:.2f}\nBeta: {beta:.4f}"
+            if ENABLE_TRADING and orders_placed:
+                msg += f"\nОбъём A: {amount_a:.6g} | B: {amount_b:.6g}"
             logger.info("СИГНАЛ ВХОДА ЛОНГ: %s / %s | Z: %.2f | Цена A: %.6g | Цена B: %.6g", asset_a, asset_b, z_score, current_price_a, current_price_b)
             send_telegram_message(msg)
             save_state(state)
             
         # Вход (Шорт спреда)
         elif not in_pos and z_score > 2.0:
-            pair_state['in_position'] = True
-            pair_state['position_type'] = -1
-            pair_state['entry_z'] = z_score
-            pair_state['entry_price_a'] = current_price_a
-            pair_state['entry_price_b'] = current_price_b
-            
-            msg = f"🔴 <b>СИГНАЛ ВХОДА!</b>\nПара: {asset_a} / {asset_b}\nНаправление: ШОРТ Спреда (Продать А, Купить B)\nZ-Score: {z_score:.2f}\nКоэфф. Хеджирования (Beta): {beta:.4f}"
+            balance = fetch_balance() if ENABLE_TRADING else 1000.0
+            amount_a, amount_b = calculate_position_amounts(balance, current_price_a, current_price_b, beta)
+
+            orders_placed = False
+            if ENABLE_TRADING and amount_a > 0 and amount_b > 0:
+                if place_entry_orders(asset_a, asset_b, -1, amount_a, amount_b):
+                    orders_placed = True
+                else:
+                    logger.error("Вход отменён из-за ошибки ордеров")
+                    time.sleep(0.5)
+                    continue
+
+            if orders_placed or not ENABLE_TRADING:
+                pair_state['in_position'] = True
+                pair_state['position_type'] = -1
+                pair_state['entry_z'] = z_score
+                pair_state['entry_price_a'] = current_price_a
+                pair_state['entry_price_b'] = current_price_b
+                pair_state['amount_a'] = amount_a if ENABLE_TRADING else 0
+                pair_state['amount_b'] = amount_b if ENABLE_TRADING else 0
+
+            msg = f"🔴 <b>СИГНАЛ ВХОДА!</b>\nПара: {asset_a} / {asset_b}\nНаправление: ШОРТ Спреда (Продать А, Купить B)\nZ-Score: {z_score:.2f}\nBeta: {beta:.4f}"
+            if ENABLE_TRADING and orders_placed:
+                msg += f"\nОбъём A: {amount_a:.6g} | B: {amount_b:.6g}"
             logger.info("СИГНАЛ ВХОДА ШОРТ: %s / %s | Z: %.2f | Цена A: %.6g | Цена B: %.6g", asset_a, asset_b, z_score, current_price_a, current_price_b)
             send_telegram_message(msg)
             save_state(state)
@@ -191,9 +320,20 @@ def run_monitor():
                 exit_reason = "Stop Loss"
                 
             if exit_trigger:
+                amt_a = pair_state.get('amount_a', 0) or 0
+                amt_b = pair_state.get('amount_b', 0) or 0
+
+                if ENABLE_TRADING and amt_a > 0 and amt_b > 0:
+                    if not place_exit_orders(asset_a, asset_b, pos_type, amt_a, amt_b):
+                        logger.error("Выход отменён из-за ошибки ордеров")
+                        time.sleep(0.5)
+                        continue
+
                 pair_state['in_position'] = False
                 pair_state['position_type'] = 0
-                
+                pair_state['amount_a'] = 0
+                pair_state['amount_b'] = 0
+
                 icon = "✅" if exit_reason == "Take Profit" else "☠️"
                 msg = f"{icon} <b>СИГНАЛ ВЫХОДА ({exit_reason})</b>\nПара: {asset_a} / {asset_b}\nТекущий Z-Score: {z_score:.2f}\nZ-Score при открытии: {pair_state['entry_z']:.2f}"
                 logger.info(
@@ -207,8 +347,11 @@ def run_monitor():
         time.sleep(0.5)
 
 if __name__ == "__main__":
+    if ENABLE_TRADING and (not BINANCE_API_KEY or not BINANCE_SECRET):
+        logger.error("ENABLE_TRADING=true, но API ключи не заданы. Ордера не будут размещаться.")
     mode = "TESTNET (тестовые деньги)" if USE_TESTNET else "MAINNET (реальные деньги)"
-    startup_msg = f"🟢 Бот запущен. Режим: {mode}. Мониторинг 5 пар начат."
+    trade_mode = "ТОРГОВЛЯ ВКЛ" if ENABLE_TRADING else "Только сигналы (торговля выкл)"
+    startup_msg = f"🟢 Бот запущен. Режим: {mode}. {trade_mode}. Мониторинг {len(TOP_PAIRS)} пар."
     logger.info(startup_msg)
     send_telegram_message(startup_msg)
 

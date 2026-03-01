@@ -28,20 +28,42 @@ TG_BOT_TOKEN = "8618153738:AAEbDalCYQoeUOvLxtkiKCInY645OKxjd48"
 TG_CHAT_ID = "837500523"
 
 # Торговые настройки
-# В идеале эти пары должны подтягиваться динамически из valid_pairs.csv (Топ-5),
-# но по ТЗ сейчас мы жестко кодируем их (Топ-5 лучших из бэктеста).
-TOP_PAIRS = [
+# Пары загружаются из valid_pairs.csv (Топ-5 по P-Value), fallback — захардкоженный список
+DEFAULT_TOP_PAIRS = [
     ("DOT/USDT:USDT", "UNI/USDT:USDT"),
     ("LDO/USDT:USDT", "SEI/USDT:USDT"),
     ("NEAR/USDT:USDT", "UNI/USDT:USDT"),
     ("AVAX/USDT:USDT", "LINK/USDT:USDT"),
     ("DOGE/USDT:USDT", "LINK/USDT:USDT")
 ]
+TOP_PAIRS_FALLBACK = DEFAULT_TOP_PAIRS
+TOP_PAIRS_N = 5  # Количество пар для мониторинга
+
+def load_top_pairs(filepath='valid_pairs.csv', top_n=TOP_PAIRS_N):
+    """Загружает Топ-N пар из valid_pairs.csv (отсортированы по P-Value)."""
+    try:
+        import pandas as pd
+        if not os.path.exists(filepath):
+            return TOP_PAIRS_FALLBACK
+        df = pd.read_csv(filepath)
+        if df.empty or len(df) < top_n:
+            return TOP_PAIRS_FALLBACK
+        pairs = []
+        for _, row in df.head(top_n).iterrows():
+            pairs.append((row['Asset_1'], row['Asset_2']))
+        return pairs
+    except Exception:
+        return TOP_PAIRS_FALLBACK
+
+TOP_PAIRS = load_top_pairs()
 
 # Параметры стратегии
 WINDOW = 100
 ALLOCATION = 0.2
 INITIAL_CAPITAL = 1000.0
+
+# Реальное исполнение ордеров (True) или только сигналы в Telegram (False)
+ENABLE_TRADING = os.getenv("ENABLE_TRADING", "false").lower() == "true"
 
 def load_state():
     default_state = {}

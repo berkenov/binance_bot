@@ -1,0 +1,18 @@
+# Логи
+logs/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.env
+
+# macOS
+.DS_Store
+
+# Сгенерированные данные
+historical_prices.csv
+valid_pairs.csv
+signals_report.csv
+trade_history.csv
+portfolio_curve.csv

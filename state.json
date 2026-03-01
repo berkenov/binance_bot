@@ -1,0 +1,47 @@
+{
+    "DOT/USDT:USDT_UNI/USDT:USDT": {
+        "in_position": false,
+        "position_type": 0,
+        "entry_price_a": 0,
+        "entry_price_b": 0,
+        "amount_a": 0,
+        "amount_b": 0,
+        "entry_z": 0
+    },
+    "LDO/USDT:USDT_SEI/USDT:USDT": {
+        "in_position": false,
+        "position_type": 0,
+        "entry_price_a": 0.2847,
+        "entry_price_b": 0.06611,
+        "amount_a": 0,
+        "amount_b": 0,
+        "entry_z": -2.3634613931664648
+    },
+    "NEAR/USDT:USDT_UNI/USDT:USDT": {
+        "in_position": false,
+        "position_type": 0,
+        "entry_price_a": 0,
+        "entry_price_b": 0,
+        "amount_a": 0,
+        "amount_b": 0,
+        "entry_z": 0
+    },
+    "AVAX/USDT:USDT_LINK/USDT:USDT": {
+        "in_position": false,
+        "position_type": 0,
+        "entry_price_a": 0,
+        "entry_price_b": 0,
+        "amount_a": 0,
+        "amount_b": 0,
+        "entry_z": 0
+    },
+    "DOGE/USDT:USDT_LINK/USDT:USDT": {
+        "in_position": false,
+        "position_type": 0,
+        "entry_price_a": 0,
+        "entry_price_b": 0,
+        "amount_a": 0,
+        "amount_b": 0,
+        "entry_z": 0
+    }
+}

@@ -7,7 +7,8 @@ import time
 from config import (
     TG_BOT_TOKEN, TG_CHAT_ID, TOP_PAIRS, WINDOW, load_state, save_state,
     USE_TESTNET, BINANCE_API_KEY, BINANCE_SECRET, setup_logging,
-    ALLOCATION, ENABLE_TRADING
+    ALLOCATION, ENABLE_TRADING, LIVE_TRADES_FILE,
+    Z_ENTRY_LONG, Z_ENTRY_SHORT, Z_EXIT_TP_LONG, Z_EXIT_TP_SHORT, Z_STOP_LOSS
 )
 
 logger = setup_logging('live_bot')
@@ -154,6 +155,54 @@ def place_exit_orders(asset_a, asset_b, position_type, amount_a, amount_b):
         orders_ok = False
     return orders_ok
 
+def log_trade(asset_a, asset_b, position_type, entry_price_a, entry_price_b,
+              exit_price_a, exit_price_b, entry_z, exit_z, exit_reason,
+              amount_a, amount_b, beta):
+    """
+    Сохраняет сделку в live_trades.csv для последующего анализа.
+    """
+    import csv
+    import os
+    from datetime import datetime
+
+    # Расчёт PnL (при amount=0 — симуляция на $100 для режима только сигналов)
+    amt_a = amount_a if amount_a > 0 else (50 / entry_price_a if entry_price_a > 0 else 0)
+    amt_b = amount_b if amount_b > 0 else (50 / entry_price_b if entry_price_b > 0 else 0)
+    if position_type == 1:  # Long spread
+        pnl_a = (exit_price_a - entry_price_a) * amt_a
+        pnl_b = (entry_price_b - exit_price_b) * amt_b
+    else:  # Short spread
+        pnl_a = (entry_price_a - exit_price_a) * amt_a
+        pnl_b = (exit_price_b - entry_price_b) * amt_b
+    pnl_usd = pnl_a + pnl_b
+    entry_value = entry_price_a * amt_a + entry_price_b * amt_b
+    pnl_pct = (pnl_usd / entry_value * 100) if entry_value > 0 else 0
+
+    row = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "pair": f"{asset_a}_{asset_b}",
+        "direction": "LONG" if position_type == 1 else "SHORT",
+        "entry_price_a": entry_price_a,
+        "entry_price_b": entry_price_b,
+        "exit_price_a": exit_price_a,
+        "exit_price_b": exit_price_b,
+        "entry_z": entry_z,
+        "exit_z": exit_z,
+        "exit_reason": exit_reason,
+        "pnl_usd": round(pnl_usd, 4),
+        "pnl_pct": round(pnl_pct, 2),
+        "beta": beta,
+        "amount_a": amount_a,
+        "amount_b": amount_b,
+    }
+    file_exists = os.path.exists(LIVE_TRADES_FILE)
+    with open(LIVE_TRADES_FILE, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=row.keys())
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
+    logger.info("Сделка записана в %s: %s %s | PnL: %.2f%%", LIVE_TRADES_FILE, row["pair"], exit_reason, pnl_pct)
+
 def calculate_current_zscore(price_a_series, price_b_series):
     """
     Считает бету, спред и текущий z-score по переданным сериям (длина должна быть равна WINDOW)
@@ -241,7 +290,7 @@ def run_monitor():
         pos_type = pair_state['position_type']
         
         # Вход (Лонг спреда)
-        if not in_pos and z_score < -2.0:
+        if not in_pos and z_score < Z_ENTRY_LONG:
             balance = fetch_balance() if ENABLE_TRADING else 1000.0  # для расчёта при логировании
             amount_a, amount_b = calculate_position_amounts(balance, current_price_a, current_price_b, beta)
 
@@ -272,7 +321,7 @@ def run_monitor():
             save_state(state)
             
         # Вход (Шорт спреда)
-        elif not in_pos and z_score > 2.0:
+        elif not in_pos and z_score > Z_ENTRY_SHORT:
             balance = fetch_balance() if ENABLE_TRADING else 1000.0
             amount_a, amount_b = calculate_position_amounts(balance, current_price_a, current_price_b, beta)
 
@@ -307,15 +356,15 @@ def run_monitor():
             exit_reason = ""
             
             # Тейк-профит: Пересечение нуля
-            if pos_type == 1 and z_score >= -0.5:
+            if pos_type == 1 and z_score >= Z_EXIT_TP_LONG:
                 exit_trigger = True
                 exit_reason = "Take Profit"
-            elif pos_type == -1 and z_score <= 0.5:
+            elif pos_type == -1 and z_score <= Z_EXIT_TP_SHORT:
                 exit_trigger = True
                 exit_reason = "Take Profit"
                 
             # Стоп-лосс
-            if z_score > 4.0 or z_score < -4.0:
+            if z_score > Z_STOP_LOSS or z_score < -Z_STOP_LOSS:
                 exit_trigger = True
                 exit_reason = "Stop Loss"
                 
@@ -328,6 +377,15 @@ def run_monitor():
                         logger.error("Выход отменён из-за ошибки ордеров")
                         time.sleep(0.5)
                         continue
+
+                # Логирование сделки для анализа
+                log_trade(
+                    asset_a, asset_b, pos_type,
+                    pair_state['entry_price_a'], pair_state['entry_price_b'],
+                    current_price_a, current_price_b,
+                    pair_state['entry_z'], z_score, exit_reason,
+                    amt_a, amt_b, beta
+                )
 
                 pair_state['in_position'] = False
                 pair_state['position_type'] = 0

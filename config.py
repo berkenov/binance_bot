@@ -62,8 +62,18 @@ WINDOW = 100
 ALLOCATION = 0.2
 INITIAL_CAPITAL = 1000.0
 
+# Пороги Z-Score (настраиваемые для оптимизации после сбора статистики)
+Z_ENTRY_LONG = float(os.getenv("Z_ENTRY_LONG", "-2.0"))   # Вход в лонг спреда при Z <
+Z_ENTRY_SHORT = float(os.getenv("Z_ENTRY_SHORT", "2.0"))  # Вход в шорт спреда при Z >
+Z_EXIT_TP_LONG = float(os.getenv("Z_EXIT_TP_LONG", "-0.5"))   # Тейк-профит для лонга при Z >=
+Z_EXIT_TP_SHORT = float(os.getenv("Z_EXIT_TP_SHORT", "0.5"))   # Тейк-профит для шорта при Z <=
+Z_STOP_LOSS = float(os.getenv("Z_STOP_LOSS", "4.0"))      # Стоп-лосс при |Z| >
+
 # Реальное исполнение ордеров (True) или только сигналы в Telegram (False)
 ENABLE_TRADING = os.getenv("ENABLE_TRADING", "false").lower() == "true"
+
+# Файл для логирования live-сделок (для последующего анализа)
+LIVE_TRADES_FILE = "live_trades.csv"
 
 def load_state():
     default_state = {}
